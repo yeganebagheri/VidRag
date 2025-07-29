@@ -1,5 +1,3 @@
-# VidRag
-
 # VideoRAG - Advanced Video Retrieval Augmented Generation
 
 > **Note**: This is a simplified version of the VideoRAG system developed during my collaboration with Bons Company. This public version is shared with the full consent and approval of Bons Company for educational and demonstration purposes.
