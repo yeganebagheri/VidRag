@@ -386,11 +386,8 @@ This project represents a simplified version of work conducted in collaboration 
 
 ## 📞 Support
 
-For questions and support:
-- 📧 Email: support@videorag.com
-- 💬 Discord: [VideoRAG Community](https://discord.gg/videorag)
-- 📖 Documentation: [docs.videorag.com](https://docs.videorag.com)
-
+For questions:
+- 📧 Email: yegane.bagheri@studenti.polito.it
 ---
 
 **VideoRAG** - Transforming video content into intelligent, searchable knowledge.
