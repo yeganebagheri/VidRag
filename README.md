@@ -296,14 +296,6 @@ curl "http://localhost:8000/api/v1/stats"
 curl "http://localhost:8000/api/v1/workers/status"
 ```
 
-## 🔒 Security Features
-
-- **Row-Level Security**: Multi-tenant data isolation
-- **JWT Authentication**: Token-based API access
-- **CORS Configuration**: Cross-origin request management
-- **Input Validation**: Comprehensive request sanitization
-- **Rate Limiting**: API abuse prevention
-
 ## 🚀 Deployment
 
 ### Docker Deployment
@@ -348,13 +340,6 @@ pytest tests/load/
 - **Batching**: Efficient batch processing for embeddings
 - **Compression**: Optimized vector storage
 
-## 🛣️ Roadmap
-
-- [ ] **Advanced NLP**: Integration with larger language models
-- [ ] **Real-time Processing**: Live video stream processing
-- [ ] **Advanced Analytics**: Video content insights and trends
-- [ ] **Mobile SDK**: Client libraries for mobile applications
-- [ ] **Federated Search**: Cross-video collection querying
 
 ## 🤝 Contributing
 
