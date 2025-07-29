@@ -1,0 +1,129 @@
+# docker/docker-compose.yml
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://videorag_user:videorag_pass@postgres:5432/videorag
+      - REDIS_URL=redis://redis:6379
+      - DEBUG=true
+    depends_on:
+      - redis
+      - postgres
+      - opensearch
+    volumes:
+      - ../src:/app/src
+      - ../requirements.txt:/app/requirements.txt
+      - ../.env:/app/.env
+    command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  transcription-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://videorag_user:videorag_pass@postgres:5432/videorag
+      - REDIS_URL=redis://redis:6379
+      - WORKER_TYPE=transcription
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ../src:/app/src
+      - ../requirements.txt:/app/requirements.txt
+      - ../.env:/app/.env
+    command: ["python", "-m", "src.workers.transcription_worker"]
+
+  vision-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://videorag_user:videorag_pass@postgres:5432/videorag
+      - REDIS_URL=redis://redis:6379
+      - WORKER_TYPE=vision
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ../src:/app/src
+      - ../requirements.txt:/app/requirements.txt
+      - ../.env:/app/.env
+    command: ["python", "-m", "src.workers.vision_worker"]
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: videorag
+      POSTGRES_USER: videorag_user
+      POSTGRES_PASSWORD: videorag_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: opensearch
+    environment:
+      - cluster.name=opensearch-cluster
+      - node.name=opensearch
+      - discovery.seed_hosts=opensearch
+      - cluster.initial_cluster_manager_nodes=opensearch
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "DISABLE_INSTALL_DEMO_CONFIG=true"
+      - "DISABLE_SECURITY_PLUGIN=true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.11.0
+    container_name: opensearch-dashboards
+    ports:
+      - "5601:5601"
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    depends_on:
+      - opensearch
+
+  # LocalStack for AWS services simulation
+  localstack:
+    image: localstack/localstack:3.0
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,events,sqs
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+    volumes:
+      - localstack_data:/tmp/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  postgres_data:
+  redis_data:
+  opensearch_data:
+  localstack_data:
