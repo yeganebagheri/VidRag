@@ -19,6 +19,17 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+# Jupyter
+.ipynb_checkpoints/
+
+# Media / data
+*.mp4
+*.mov
+*.avi
+MECD-Benchmark/
+
+# OS
+.DS_Store
 
 # Virtual Environment
 venv/

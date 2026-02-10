@@ -1,0 +1,12 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "stack"
+resolve_s3 = true
+s3_prefix = "stack"
+region = "eu-west-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+disable_rollback = true
+parameter_overrides = "Environment=\"dev\" SupabaseUrl=\"https://wnsguzqrpzraxexhzqdy.supabase.co\" VideoBucketName=\"videorag-uploads\" ProcessingQueueName=\"videorag-video-processing\""
+image_repositories = []

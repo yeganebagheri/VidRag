@@ -1,0 +1,248 @@
+
+# AWSTemplateFormatVersion: '2010-09-09'
+# Transform: AWS::Serverless-2016-10-31
+# Description: SAM template for VideoRAG
+
+# Globals:
+#   Function:
+#     Timeout: 30
+#     Runtime: python3.13
+#     Tracing: Active
+#     Environment:
+#       Variables:
+#         # Use a literal bucket name string to avoid direct dependency on the resource
+#         CONTENT_BUCKET: !Sub "${AWS::StackName}-bucket-${AWS::AccountId}"
+#     LoggingConfig:
+#       LogFormat: JSON
+
+# Resources:
+#   ContentBucket:
+#     Type: AWS::S3::Bucket
+#     Properties:
+#       BucketName: !Sub "content-bucket-${AWS::AccountId}"
+#       PublicAccessBlockConfiguration:
+#         BlockPublicAcls: true
+#         BlockPublicPolicy: true
+#         IgnorePublicAcls: true
+#         RestrictPublicBuckets: true
+#       CorsConfiguration:
+#         CorsRules:
+#           - AllowedHeaders: ['*']
+#             AllowedMethods: ['PUT', 'POST', 'GET']
+#             AllowedOrigins: ['*']
+
+
+#   ElaborateVideo:
+#     Type: AWS::Serverless::Function
+#     Properties:
+#       FunctionName: !Sub "${AWS::StackName}-s3-trigger"
+#       CodeUri: functions/object_created/
+#       Handler: app.lambda_handler
+#       Policies:
+#         - S3CrudPolicy:
+#            BucketName: !Sub "content-bucket-${AWS::AccountId}"        
+#       Events:
+#         S3Upload:
+#           Type: S3 
+#           Properties:
+#             Bucket: !Ref ContentBucket
+#             Events: s3:ObjectCreated:*
+
+# Outputs:
+
+#   BucketName:
+#     Description: Name of the created S3 bucket 
+#     Value: !Ref ContentBucket
+
+#   BucketArn:
+#     Description: ARN of the created S3 bucket
+#     Value: !GetAtt ContentBucket.Arn
+
+#   ElaborateVideo:
+#     Description: ARN of the Lambda triggered by object uploads
+#     Value: !GetAtt ElaborateVideo.Arn
+
+# # CREATE S3 SQS BUS AND THEN CALL THE APIs
+
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: VideoRAG S3 Upload Processing Pipeline - Minimal Version
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  SupabaseUrl:
+    Type: String
+    Description: Supabase project URL
+    NoEcho: false
+  
+  SupabaseServiceKey:
+    Type: String
+    Description: Supabase service role key
+    NoEcho: true
+  
+  VideoBucketName:
+    Type: String
+    Description: S3 bucket name for video uploads
+    Default: videorag-uploads
+  
+  ProcessingQueueName:
+    Type: String
+    Description: SQS queue name for video processing
+    Default: videorag-video-processing
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 300
+    MemorySize: 512
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        SUPABASE_URL: !Ref SupabaseUrl
+        SUPABASE_SERVICE_KEY: !Ref SupabaseServiceKey
+
+Resources:
+  # Step 1: Create SQS Queues first
+  VideoProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProcessingQueueName}-${Environment}"
+      VisibilityTimeoutSeconds: 900
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+
+  VideoProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProcessingQueueName}-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600
+
+  TranscriptionCompletedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "videorag-transcription-completed-${Environment}"
+      VisibilityTimeoutSeconds: 300
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+
+  SceneDetectionCompletedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "videorag-scene-detection-completed-${Environment}"
+      VisibilityTimeoutSeconds: 300
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+
+  EmbeddingGeneratedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "videorag-embedding-generated-${Environment}"
+      VisibilityTimeoutSeconds: 300
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+
+  IndexingCompletedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "videorag-indexing-completed-${Environment}"
+      VisibilityTimeoutSeconds: 300
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+
+  # Step 2: Create Lambda function without S3 events first
+  S3EventProcessor:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "videorag-s3-processor-${Environment}"
+      CodeUri: ./
+      Handler: app.lambda_handler
+      Description: Process S3 upload events and trigger video processing pipeline
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref VideoProcessingQueue
+          VIDEO_BUCKET_NAME: !Sub "${VideoBucketName}-${Environment}"
+          TRANSCRIPTION_QUEUE_URL: !Ref TranscriptionCompletedQueue
+          SCENE_DETECTION_QUEUE_URL: !Ref SceneDetectionCompletedQueue
+          EMBEDDING_QUEUE_URL: !Ref EmbeddingGeneratedQueue
+          INDEXING_QUEUE_URL: !Ref IndexingCompletedQueue
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:GetObjectMetadata
+              Resource: !Sub "arn:aws:s3:::${VideoBucketName}-${Environment}/*"
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+                - sqs:GetQueueAttributes
+              Resource:
+                - !GetAtt VideoProcessingQueue.Arn
+                - !GetAtt TranscriptionCompletedQueue.Arn
+                - !GetAtt SceneDetectionCompletedQueue.Arn
+                - !GetAtt EmbeddingGeneratedQueue.Arn
+                - !GetAtt IndexingCompletedQueue.Arn
+
+  # Step 3: Create S3 bucket separately 
+  VideoBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${VideoBucketName}-${Environment}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+Outputs:
+  VideoBucketName:
+    Description: "S3 bucket name for video uploads"
+    Value: !Ref VideoBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-VideoBucket"
+
+  VideoProcessingQueueUrl:
+    Description: "SQS queue URL for video processing"
+    Value: !Ref VideoProcessingQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-ProcessingQueue"
+
+  S3EventProcessorArn:
+    Description: "Lambda function ARN for S3 event processing"
+    Value: !GetAtt S3EventProcessor.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-S3Processor"
+
+  TranscriptionQueueUrl:
+    Description: "SQS queue URL for transcription completed events"
+    Value: !Ref TranscriptionCompletedQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-TranscriptionQueue"
+
+  SceneDetectionQueueUrl:
+    Description: "SQS queue URL for scene detection completed events"
+    Value: !Ref SceneDetectionCompletedQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-SceneDetectionQueue"
+
+  EmbeddingQueueUrl:
+    Description: "SQS queue URL for embedding generated events"
+    Value: !Ref EmbeddingGeneratedQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-EmbeddingQueue"
+
+  IndexingQueueUrl:
+    Description: "SQS queue URL for indexing completed events"
+    Value: !Ref IndexingCompletedQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-IndexingQueue"
+      

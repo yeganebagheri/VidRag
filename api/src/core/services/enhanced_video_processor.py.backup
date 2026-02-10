@@ -1,0 +1,1119 @@
+# src/core/services/enhanced_video_processor.py
+
+import os
+import cv2
+import tempfile
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+import logging
+import numpy as np
+from faster_whisper import WhisperModel
+import easyocr
+import open_clip
+import torch
+from sentence_transformers import SentenceTransformer
+from PIL import Image
+import networkx as nx
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
+import asyncio
+
+# Import our new InternVL encoder
+from src.core.models.internvl_encoder import get_internvl_encoder, InternVLUnifiedEncoder
+
+logger = logging.getLogger(__name__)
+
+class InternVLEnhancedVideoProcessor:
+    """
+    Enhanced Video Processor with InternVL 2.0 Integration and NLP Compatibility Fix
+    
+    Key Improvements:
+    1. InternVL unified multimodal encoding
+    2. Superior cross-modal understanding
+    3. Enhanced video segment processing
+    4. Robust NLP fallback chain (spaCy -> NLTK+TextBlob -> Basic)
+    5. NumPy 1.x compatibility
+    6. Backward compatible with existing system
+    """
+    
+    def __init__(self):
+        # Existing components (keep for compatibility)
+        self.whisper_model = None
+        self.ocr_reader = None
+        self.clip_model = None
+        self.clip_preprocess = None
+        self.embedding_model = None
+        
+        # Enhanced NLP with fallback chain
+        self.nlp = None
+        self.nlp_method = None
+        
+        # NEW: InternVL unified encoder
+        self.internvl_encoder: Optional[InternVLUnifiedEncoder] = None
+        
+        self.temp_dir = Path(tempfile.gettempdir()) / "videorag"
+        self.temp_dir.mkdir(exist_ok=True)
+        
+        # Enhanced parameters
+        self.scene_threshold = 0.3
+        self.max_segment_duration = 30.0
+        self.frame_sample_rate = 1.0
+        
+        # InternVL configuration
+        self.use_internvl = True  # Enable/disable InternVL
+        self.internvl_frame_limit = 8  # Max frames per segment for InternVL
+        
+    async def initialize(self):
+        """Initialize all ML models including InternVL and robust NLP"""
+        logger.info("Initializing Enhanced Video Processor with InternVL and NLP compatibility...")
+        
+        # Initialize existing models (keep for fallback/compatibility)
+        await self._initialize_existing_models()
+        
+        # Initialize NLP with robust fallback chain
+        await self._initialize_nlp_chain()
+        
+        # Initialize InternVL unified encoder
+        if self.use_internvl:
+            try:
+                logger.info("Loading InternVL unified encoder...")
+                self.internvl_encoder = await get_internvl_encoder()
+                logger.info("InternVL encoder loaded successfully")
+            except Exception as e:
+                logger.error(f"InternVL failed to load: {e}")
+                logger.info("Falling back to existing models")
+                self.use_internvl = False
+        
+        logger.info("Enhanced Video Processor initialized!")
+    
+    async def _initialize_existing_models(self):
+        """Initialize existing models (whisper, clip, etc.)"""
+        # Initialize Whisper for transcription
+        try:
+            self.whisper_model = WhisperModel("base", device="cpu")
+            logger.info("Whisper model loaded")
+        except Exception as e:
+            logger.error(f"Failed to load Whisper: {e}")
+        
+        # Initialize OCR
+        try:
+            self.ocr_reader = easyocr.Reader(['en'])
+            logger.info("OCR reader loaded")
+        except Exception as e:
+            logger.error(f"Failed to load OCR: {e}")
+        
+        # Initialize CLIP (keep for fallback)
+        try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.clip_model, _, self.clip_preprocess = open_clip.create_model_and_transforms(
+                "ViT-B-32", pretrained="laion2b_s34b_b79k", device=device
+            )
+            self.clip_model = self.clip_model.to(device).eval()
+            logger.info("CLIP model loaded")
+        except Exception as e:
+            logger.error(f"Failed to load CLIP: {e}")
+        
+        # Initialize embedding model (keep for text-only fallback)
+        try:
+            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            logger.info("Embedding model loaded")
+        except Exception as e:
+            logger.error(f"Failed to load embedding model: {e}")
+
+    async def _initialize_nlp_chain(self):
+        """Initialize NLP with robust fallback chain"""
+        
+        # Option 1: Try spaCy with compatible version
+        try:
+            import spacy
+            self.nlp = spacy.load("en_core_web_sm")
+            self.nlp_method = "spacy"
+            logger.info("spaCy NLP loaded successfully")
+            return
+        except Exception as e:
+            logger.warning(f"spaCy failed to load: {e}")
+        
+        # Option 2: Fallback to NLTK + TextBlob
+        try:
+            import nltk
+            from textblob import TextBlob
+            
+            # Download required NLTK data
+            try:
+                nltk.download('punkt', quiet=True)
+                nltk.download('averaged_perceptron_tagger', quiet=True)
+                nltk.download('maxent_ne_chunker', quiet=True)
+                nltk.download('words', quiet=True)
+                nltk.download('vader_lexicon', quiet=True)
+            except:
+                pass
+            
+            self.nlp_method = "nltk_textblob"
+            logger.info("NLTK + TextBlob NLP loaded")
+            return
+        except Exception as e:
+            logger.warning(f"NLTK + TextBlob failed: {e}")
+        
+        # Option 3: Basic text processing only
+        self.nlp_method = "basic"
+        logger.warning("Using basic text processing only - limited NLP features")
+
+    async def process_video(self, video_path: str, video_id: str) -> Dict[str, Any]:
+        """
+        Enhanced video processing with InternVL integration and robust NLP
+        
+        Key Enhancement: Uses InternVL for unified multimodal understanding + NLP fallback chain
+        """
+        logger.info(f"Processing video with InternVL enhancement: {video_path}")
+        
+        results = {
+            "video_id": video_id,
+            "transcription": [],
+            "visual_segments": [],
+            "scene_boundaries": [],
+            "hierarchical_segments": [],
+            "knowledge_graph": {},
+            "embeddings": [],
+            "internvl_enhanced": self.use_internvl,
+            "nlp_method_used": self.nlp_method
+        }
+        
+        try:
+            # Step 1: Extract basic video info
+            video_info = await self._extract_video_info(video_path)
+            results["video_info"] = video_info
+            
+            # Step 2: Scene detection (existing logic)
+            scene_boundaries = await self._detect_scenes(video_path)
+            results["scene_boundaries"] = scene_boundaries
+            
+            # Step 3: Enhanced transcription
+            transcription = await self._enhanced_transcription(video_path)
+            results["transcription"] = transcription
+            
+            # Step 4: Enhanced visual processing with InternVL
+            visual_segments = await self._process_visual_content_enhanced(
+                video_path, scene_boundaries
+            )
+            results["visual_segments"] = visual_segments
+            
+            # Step 5: Enhanced hierarchical segmentation
+            hierarchical_segments = await self._create_hierarchical_segments_enhanced(
+                transcription, visual_segments, scene_boundaries
+            )
+            results["hierarchical_segments"] = hierarchical_segments
+            
+            # Step 6: Enhanced knowledge extraction with robust NLP
+            knowledge_graph = await self._extract_knowledge_graph(hierarchical_segments)
+            results["knowledge_graph"] = knowledge_graph
+            
+            # Step 7: Generate InternVL-enhanced embeddings
+            embeddings = await self._generate_internvl_embeddings(hierarchical_segments)
+            results["embeddings"] = embeddings
+            
+            logger.info(f"Enhanced video processing completed for {video_id}")
+            
+        except Exception as e:
+            logger.error(f"Enhanced video processing failed for {video_id}: {e}")
+            raise
+        
+        return self._convert_numpy_types(results)
+    
+    async def _process_visual_content_enhanced(
+        self, 
+        video_path: str, 
+        scene_boundaries: List[Dict]
+    ) -> List[Dict]:
+        """Enhanced visual processing with InternVL integration"""
+        
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        
+        visual_segments = []
+        
+        for scene in scene_boundaries:
+            scene_start_frame = int(scene["start"] * fps)
+            scene_end_frame = int(scene["end"] * fps)
+            
+            # Sample frames within the scene
+            cap.set(cv2.CAP_PROP_POS_FRAMES, scene_start_frame)
+            
+            frames = []
+            frame_timestamps = []
+            frame_count = scene_start_frame
+            
+            while frame_count < scene_end_frame:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Sample every second within the scene
+                if (frame_count - scene_start_frame) % int(fps) == 0:
+                    frames.append(frame)
+                    frame_timestamps.append(frame_count / fps)
+                
+                frame_count += 1
+            
+            if not frames:
+                continue
+            
+            # Enhanced processing with InternVL
+            scene_visual_data = await self._process_scene_frames_enhanced(
+                frames, frame_timestamps, scene["scene_id"]
+            )
+            visual_segments.append(scene_visual_data)
+        
+        cap.release()
+        return visual_segments
+    
+    async def _process_scene_frames_enhanced(
+        self, 
+        frames: List, 
+        timestamps: List[float], 
+        scene_id: int
+    ) -> Dict:
+        """Enhanced frame processing with InternVL"""
+        
+        # Convert frames to PIL Images for InternVL
+        pil_images = []
+        for frame in frames[:self.internvl_frame_limit]:  # Limit frames for memory
+            pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            pil_images.append(pil_img)
+        
+        # Process with both existing CLIP and new InternVL
+        visual_features = []
+        internvl_features = None
+        ocr_results = []
+        
+        # Existing CLIP processing (keep for fallback)
+        if self.clip_model:
+            device = next(self.clip_model.parameters()).device
+            for i, pil_img in enumerate(pil_images):
+                img_tensor = self.clip_preprocess(pil_img).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    features = self.clip_model.encode_image(img_tensor)
+                    visual_features.append(features.cpu().numpy().flatten())
+        
+        # NEW: InternVL processing for unified understanding
+        if self.use_internvl and self.internvl_encoder:
+            try:
+                # Create context text for the scene
+                scene_context = f"Video scene {scene_id} containing visual content"
+                
+                # Get unified InternVL encoding
+                internvl_output = await self.internvl_encoder.encode_unified(
+                    text=scene_context,
+                    images=pil_images,
+                    normalize=True
+                )
+                
+                if internvl_output.unified_embedding is not None:
+                    internvl_features = internvl_output.unified_embedding.tolist()
+                    
+            except Exception as e:
+                logger.warning(f"InternVL processing failed for scene {scene_id}: {e}")
+        
+        # OCR processing (existing)
+        for i, pil_img in enumerate(pil_images):
+            try:
+                ocr_result = self.ocr_reader.readtext(np.array(pil_img))
+                frame_ocr = []
+                for bbox, text, confidence in ocr_result:
+                    if confidence > 0.5:
+                        frame_ocr.append({
+                            "text": text,
+                            "confidence": float(confidence),
+                            "bbox": [[float(x), float(y)] for x, y in bbox],
+                            "timestamp": timestamps[i] if i < len(timestamps) else 0
+                        })
+                ocr_results.extend(frame_ocr)
+            except Exception as e:
+                logger.warning(f"OCR failed for frame: {e}")
+        
+        # Combine features
+        result = {
+            "scene_id": scene_id,
+            "start": timestamps[0] if timestamps else 0,
+            "end": timestamps[-1] if timestamps else 0,
+            "ocr_results": ocr_results,
+            "num_frames": len(frames)
+        }
+        
+        # Add visual features (CLIP)
+        if visual_features:
+            avg_visual_features = np.mean(visual_features, axis=0)
+            result["visual_features"] = avg_visual_features.tolist()
+        else:
+            result["visual_features"] = np.zeros(512).tolist()
+        
+        # Add InternVL unified features (NEW)
+        if internvl_features:
+            result["internvl_features"] = internvl_features
+            result["internvl_enhanced"] = True
+        else:
+            result["internvl_features"] = np.zeros(768).tolist()  # Default dimension
+            result["internvl_enhanced"] = False
+        
+        return result
+    
+    async def _create_hierarchical_segments_enhanced(
+        self, 
+        transcription: List[Dict], 
+        visual_segments: List[Dict], 
+        scene_boundaries: List[Dict]
+    ) -> List[Dict]:
+        """Enhanced hierarchical segmentation with InternVL context"""
+        
+        hierarchical_segments = []
+        
+        for scene in scene_boundaries:
+            scene_start = scene["start"]
+            scene_end = scene["end"]
+            scene_id = scene["scene_id"]
+            
+            # Find transcription segments within this scene
+            scene_transcripts = [
+                t for t in transcription 
+                if t["start"] >= scene_start and t["end"] <= scene_end
+            ]
+            
+            # Find visual data for this scene
+            scene_visual = next(
+                (v for v in visual_segments if v["scene_id"] == scene_id), 
+                None
+            )
+            
+            # Enhanced segment creation
+            if scene_transcripts:
+                # Group transcripts into logical segments
+                segments = self._group_transcripts_by_semantic_similarity(scene_transcripts)
+                
+                for i, segment_transcripts in enumerate(segments):
+                    segment_start = min(t["start"] for t in segment_transcripts)
+                    segment_end = max(t["end"] for t in segment_transcripts)
+                    
+                    # Combine text from all transcripts in this segment
+                    combined_text = " ".join(t["text"] for t in segment_transcripts)
+                    
+                    hierarchical_segment = {
+                        "segment_id": f"{scene_id}_{i}",
+                        "scene_id": scene_id,
+                        "start": segment_start,
+                        "end": segment_end,
+                        "text": combined_text,
+                        "transcripts": segment_transcripts,
+                        "visual_data": scene_visual,
+                        "duration": segment_end - segment_start,
+                        # NEW: Enhanced with InternVL capabilities
+                        "internvl_enhanced": scene_visual.get("internvl_enhanced", False) if scene_visual else False
+                    }
+                    
+                    hierarchical_segments.append(hierarchical_segment)
+            else:
+                # Scene with no transcription (visual only)
+                if scene_visual:
+                    hierarchical_segment = {
+                        "segment_id": f"{scene_id}_0",
+                        "scene_id": scene_id,
+                        "start": scene_start,
+                        "end": scene_end,
+                        "text": "",
+                        "transcripts": [],
+                        "visual_data": scene_visual,
+                        "duration": scene_end - scene_start,
+                        "internvl_enhanced": scene_visual.get("internvl_enhanced", False)
+                    }
+                    hierarchical_segments.append(hierarchical_segment)
+        
+        return hierarchical_segments
+    
+    async def _generate_internvl_embeddings(
+        self, 
+        hierarchical_segments: List[Dict]
+    ) -> List[Dict]:
+        """Generate embeddings using InternVL unified encoder"""
+        
+        embeddings = []
+        
+        for segment in hierarchical_segments:
+            embedding_data = {
+                "segment_id": segment["segment_id"],
+                "scene_id": segment["scene_id"],
+                "timestamp": segment["start"],
+                "embeddings": {},
+                "processing_method": "internvl" if self.use_internvl else "legacy"
+            }
+            
+            # NEW: InternVL unified embedding (primary method)
+            if self.use_internvl and self.internvl_encoder and segment.get("internvl_enhanced", False):
+                try:
+                    # Prepare segment data for InternVL
+                    segment_data = {
+                        "text": segment["text"],
+                        "metadata": {
+                            "segment_id": segment["segment_id"],
+                            "scene_id": segment["scene_id"],
+                            "start": segment["start"],
+                            "ocr_texts": []
+                        }
+                    }
+                    
+                    # Extract OCR texts if available
+                    if segment["visual_data"] and segment["visual_data"]["ocr_results"]:
+                        segment_data["metadata"]["ocr_texts"] = [
+                            ocr["text"] for ocr in segment["visual_data"]["ocr_results"]
+                        ]
+                    
+                    # Get frames for this segment (if available)
+                    images = self._extract_segment_frames(segment)
+                    if images:
+                        segment_data["images"] = images
+                    
+                    # Generate unified embedding with InternVL
+                    internvl_output = await self.internvl_encoder.encode_video_segment(segment_data)
+                    
+                    if internvl_output.unified_embedding is not None:
+                        # Use InternVL unified embedding as primary
+                        embedding_data["embeddings"]["unified"] = internvl_output.unified_embedding.tolist()
+                        embedding_data["embeddings"]["text"] = internvl_output.unified_embedding.tolist()  # Backward compatibility
+                        embedding_data["embeddings"]["visual"] = internvl_output.unified_embedding.tolist()  # Backward compatibility
+                        embedding_data["confidence"] = internvl_output.confidence_scores.get("unified", 1.0)
+                        embedding_data["internvl_metadata"] = internvl_output.metadata
+                    else:
+                        # Fallback to legacy method
+                        await self._generate_legacy_embeddings(segment, embedding_data)
+                        
+                except Exception as e:
+                    logger.warning(f"InternVL embedding failed for segment {segment['segment_id']}: {e}")
+                    # Fallback to legacy method
+                    await self._generate_legacy_embeddings(segment, embedding_data)
+            else:
+                # Use legacy embedding methods
+                await self._generate_legacy_embeddings(segment, embedding_data)
+            
+            # Metadata
+            embedding_data["metadata"] = {
+                "duration": segment["duration"],
+                "num_transcripts": len(segment["transcripts"]),
+                "has_visual": segment["visual_data"] is not None,
+                "has_ocr": bool(segment["visual_data"] and segment["visual_data"]["ocr_results"]),
+                "internvl_enhanced": segment.get("internvl_enhanced", False)
+            }
+            
+            embeddings.append(embedding_data)
+        
+        return embeddings
+    
+    async def _generate_legacy_embeddings(self, segment: Dict, embedding_data: Dict):
+        """Generate embeddings using legacy methods (fallback)"""
+        
+        # Text embedding (existing method)
+        if segment["text"] and self.embedding_model:
+            text_embedding = self.embedding_model.encode(segment["text"])
+            embedding_data["embeddings"]["text"] = text_embedding.tolist()
+        else:
+            embedding_data["embeddings"]["text"] = np.zeros(384).tolist()
+        
+        # Visual embedding (existing CLIP method)
+        if segment["visual_data"] and segment["visual_data"]["visual_features"]:
+            embedding_data["embeddings"]["visual"] = segment["visual_data"]["visual_features"]
+        else:
+            embedding_data["embeddings"]["visual"] = np.zeros(512).tolist()
+        
+        # OCR embedding (existing method)
+        if segment["visual_data"] and segment["visual_data"]["ocr_results"]:
+            ocr_texts = [ocr["text"] for ocr in segment["visual_data"]["ocr_results"]]
+            combined_ocr = " ".join(ocr_texts)
+            if combined_ocr.strip() and self.embedding_model:
+                ocr_embedding = self.embedding_model.encode(combined_ocr)
+                embedding_data["embeddings"]["ocr"] = ocr_embedding.tolist()
+            else:
+                embedding_data["embeddings"]["ocr"] = np.zeros(384).tolist()
+        else:
+            embedding_data["embeddings"]["ocr"] = np.zeros(384).tolist()
+        
+        # Create unified embedding by concatenating (simple fusion)
+        text_emb = np.array(embedding_data["embeddings"]["text"])
+        visual_emb = np.array(embedding_data["embeddings"]["visual"])
+        ocr_emb = np.array(embedding_data["embeddings"]["ocr"])
+        
+        # Simple concatenation (you could use more sophisticated fusion)
+        unified_embedding = np.concatenate([text_emb[:256], visual_emb[:256], ocr_emb[:256]])
+        embedding_data["embeddings"]["unified"] = unified_embedding.tolist()
+        embedding_data["confidence"] = 0.7  # Default confidence for legacy
+    
+    def _extract_segment_frames(self, segment: Dict) -> Optional[List[Image.Image]]:
+        """Extract frames for a specific segment (if needed for InternVL)"""
+        # This is a simplified version - in production you might want to
+        # extract frames specifically for this segment's timespan
+        return None  # For now, rely on scene-level frames
+
+    # === ENHANCED NLP METHODS ===
+    
+    def _extract_entities_spacy(self, text: str) -> List[Dict[str, Any]]:
+        """Extract entities using spaCy"""
+        try:
+            doc = self.nlp(text)
+            entities = []
+            
+            for ent in doc.ents:
+                entities.append({
+                    "text": ent.text,
+                    "label": ent.label_,
+                    "start": ent.start_char,
+                    "end": ent.end_char,
+                    "confidence": 1.0  # spaCy doesn't provide confidence
+                })
+            
+            return entities
+        except Exception as e:
+            logger.error(f"spaCy entity extraction failed: {e}")
+            return []
+    
+    def _extract_entities_nltk(self, text: str) -> List[Dict[str, Any]]:
+        """Extract entities using NLTK + TextBlob"""
+        try:
+            import nltk
+            from textblob import TextBlob
+            
+            blob = TextBlob(text)
+            entities = []
+            
+            # Extract named entities using NLTK
+            tokens = nltk.word_tokenize(text)
+            pos_tags = nltk.pos_tag(tokens)
+            
+            # Simple named entity recognition
+            chunks = nltk.ne_chunk(pos_tags)
+            
+            current_entity = []
+            current_label = None
+            
+            for chunk in chunks:
+                if hasattr(chunk, 'label'):
+                    if current_entity:
+                        # Save previous entity
+                        entity_text = " ".join(current_entity)
+                        entities.append({
+                            "text": entity_text,
+                            "label": current_label,
+                            "start": text.find(entity_text),
+                            "end": text.find(entity_text) + len(entity_text),
+                            "confidence": 0.8
+                        })
+                    
+                    # Start new entity
+                    current_entity = [token for token, pos in chunk.leaves()]
+                    current_label = chunk.label()
+                else:
+                    if current_entity:
+                        # Save current entity
+                        entity_text = " ".join(current_entity)
+                        entities.append({
+                            "text": entity_text,
+                            "label": current_label,
+                            "start": text.find(entity_text),
+                            "end": text.find(entity_text) + len(entity_text),
+                            "confidence": 0.8
+                        })
+                        current_entity = []
+                        current_label = None
+            
+            # Don't forget the last entity
+            if current_entity:
+                entity_text = " ".join(current_entity)
+                entities.append({
+                    "text": entity_text,
+                    "label": current_label,
+                    "start": text.find(entity_text),
+                    "end": text.find(entity_text) + len(entity_text),
+                    "confidence": 0.8
+                })
+            
+            return entities
+            
+        except Exception as e:
+            logger.error(f"NLTK entity extraction failed: {e}")
+            return []
+    
+    def _extract_entities_basic(self, text: str) -> List[Dict[str, Any]]:
+        """Basic entity extraction using simple rules"""
+        import re
+        
+        entities = []
+        
+        # Simple patterns for common entities
+        patterns = {
+            "PERSON": [
+                r'\b[A-Z][a-z]+ [A-Z][a-z]+\b',  # FirstName LastName
+                r'\b(?:Mr|Mrs|Ms|Dr|Prof)\.? [A-Z][a-z]+\b'  # Title Name
+            ],
+            "ORG": [
+                r'\b[A-Z][a-z]+ (?:Inc|Corp|LLC|Ltd|Company|Corporation)\b',
+                r'\b(?:Google|Microsoft|Apple|Amazon|Facebook|Tesla)\b'
+            ],
+            "LOCATION": [
+                r'\b[A-Z][a-z]+(?:, [A-Z][a-z]+)*\b'  # City, State pattern
+            ]
+        }
+        
+        for label, pattern_list in patterns.items():
+            for pattern in pattern_list:
+                matches = re.finditer(pattern, text)
+                for match in matches:
+                    entities.append({
+                        "text": match.group(),
+                        "label": label,
+                        "start": match.start(),
+                        "end": match.end(),
+                        "confidence": 0.6  # Lower confidence for basic extraction
+                    })
+        
+        return entities
+
+    def extract_entities(self, text: str) -> List[Dict[str, Any]]:
+        """Extract entities using available NLP method"""
+        
+        if not text.strip():
+            return []
+        
+        if self.nlp_method == "spacy":
+            return self._extract_entities_spacy(text)
+        elif self.nlp_method == "nltk_textblob":
+            return self._extract_entities_nltk(text)
+        else:
+            return self._extract_entities_basic(text)
+
+    def get_sentiment(self, text: str) -> Dict[str, float]:
+        """Get sentiment analysis using available method"""
+        
+        if not text.strip():
+            return {"polarity": 0.0, "subjectivity": 0.0}
+        
+        if self.nlp_method in ["nltk_textblob", "spacy"]:
+            try:
+                from textblob import TextBlob
+                blob = TextBlob(text)
+                return {
+                    "polarity": float(blob.sentiment.polarity),
+                    "subjectivity": float(blob.sentiment.subjectivity)
+                }
+            except:
+                pass
+        
+        # Fallback: neutral sentiment
+        return {"polarity": 0.0, "subjectivity": 0.0}
+
+    def _extract_topics(self, text: str) -> List[str]:
+        """Extract topics using simple frequency analysis"""
+        import re
+        from collections import Counter
+        
+        # Simple topic extraction
+        words = re.findall(r'\b[a-z]{4,}\b', text.lower())
+        
+        # Remove common stop words
+        stop_words = {
+            'this', 'that', 'with', 'have', 'will', 'from', 'they', 'know',
+            'want', 'been', 'good', 'much', 'some', 'time', 'very', 'when',
+            'come', 'here', 'just', 'like', 'long', 'make', 'many', 'over',
+            'such', 'take', 'than', 'them', 'well', 'were', 'what'
+        }
+        
+        filtered_words = [word for word in words if word not in stop_words]
+        
+        # Get most common words as topics
+        word_freq = Counter(filtered_words)
+        topics = [word for word, count in word_freq.most_common(10) if count > 1]
+        
+        return topics
+    
+    # === EXISTING METHODS (keep unchanged for compatibility) ===
+    
+    async def _detect_scenes(self, video_path: str) -> List[Dict]:
+        """Detect scene boundaries using visual similarity (unchanged)"""
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        
+        frames = []
+        timestamps = []
+        frame_count = 0
+        
+        # Sample frames at regular intervals
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            if frame_count % int(fps) == 0:  # Sample every second
+                frames.append(frame)
+                timestamps.append(frame_count / fps)
+            frame_count += 1
+        
+        cap.release()
+        
+        if len(frames) < 2:
+            return [{"start": 0, "end": frame_count / fps, "scene_id": 0}]
+        
+        # Use existing CLIP for scene detection (reliable method)
+        scene_features = []
+        if self.clip_model:
+            device = next(self.clip_model.parameters()).device
+            
+            for frame in frames:
+                pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                img_tensor = self.clip_preprocess(pil_img).unsqueeze(0).to(device)
+                
+                with torch.no_grad():
+                    features = self.clip_model.encode_image(img_tensor)
+                    scene_features.append(features.cpu().numpy().flatten())
+        else:
+            # Fallback: use simple frame difference
+            return [{"start": 0, "end": timestamps[-1] if timestamps else 0, "scene_id": 0}]
+        
+        # Detect scene boundaries based on feature similarity
+        scene_boundaries = []
+        current_scene_start = 0
+        scene_id = 0
+        
+        for i in range(1, len(scene_features)):
+            similarity = cosine_similarity(
+                [scene_features[i-1]], [scene_features[i]]
+            )[0][0]
+            
+            if similarity < self.scene_threshold:
+                # Scene boundary detected
+                scene_boundaries.append({
+                    "start": timestamps[current_scene_start],
+                    "end": timestamps[i],
+                    "scene_id": scene_id
+                })
+                current_scene_start = i
+                scene_id += 1
+        
+        # Add final scene
+        scene_boundaries.append({
+            "start": timestamps[current_scene_start],
+            "end": timestamps[-1],
+            "scene_id": scene_id
+        })
+        
+        return scene_boundaries
+
+    async def _enhanced_transcription(self, video_path: str) -> List[Dict]:
+        """Enhanced transcription with timing and confidence (unchanged)"""
+        # Extract audio
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
+            audio_path = temp_audio.name
+
+        try:
+            # Extract audio using ffmpeg
+            import subprocess
+            result = subprocess.run([
+                "ffmpeg", "-y", "-i", video_path,
+                "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", audio_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            if result.returncode != 0:
+                logger.error("FFmpeg failed")
+                return []
+
+            # Transcribe with enhanced options
+            segments, info = self.whisper_model.transcribe(
+                audio_path,
+                language=None,  # Auto-detect
+                word_timestamps=True,
+                vad_filter=True,
+                beam_size=5
+            )
+
+            transcription = []
+            for segment in segments:
+                segment_data = {
+                    "start": float(segment.start),
+                    "end": float(segment.end),
+                    "text": segment.text.strip(),
+                    "confidence": float(getattr(segment, 'avg_logprob', 0.0)),
+                    "language": info.language,
+                    "words": []
+                }
+                
+                # Add word-level timing if available
+                if hasattr(segment, 'words') and segment.words:
+                    for word in segment.words:
+                        segment_data["words"].append({
+                            "word": word.word,
+                            "start": float(word.start),
+                            "end": float(word.end),
+                            "probability": float(word.probability)
+                        })
+                
+                transcription.append(segment_data)
+
+            return transcription
+
+        finally:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+
+    async def _extract_knowledge_graph(self, hierarchical_segments: List[Dict]) -> Dict:
+        """Enhanced knowledge graph extraction with robust NLP"""
+        
+        knowledge_graph = {
+            "entities": {},
+            "relationships": [],
+            "topics": [],
+            "sentiment_analysis": {},
+            "nlp_method_used": self.nlp_method
+        }
+        
+        all_text = " ".join(seg["text"] for seg in hierarchical_segments if seg["text"])
+        
+        if not all_text.strip():
+            return knowledge_graph
+        
+        # Extract entities using available NLP method
+        entities = self.extract_entities(all_text)
+        
+        # Group entities by type
+        for entity in entities:
+            label = entity["label"]
+            if label not in knowledge_graph["entities"]:
+                knowledge_graph["entities"][label] = []
+            knowledge_graph["entities"][label].append(entity)
+        
+        # Extract relationships (enhanced)
+        sentences = all_text.split('.')
+        for sentence in sentences[:50]:  # Limit processing
+            sentence = sentence.strip()
+            if len(sentence) < 10:  # Skip very short sentences
+                continue
+                
+            sentence_entities = self.extract_entities(sentence)
+            
+            # Simple co-occurrence relationships
+            for i, ent1 in enumerate(sentence_entities):
+                for ent2 in sentence_entities[i+1:]:
+                    if ent1["label"] != ent2["label"]:  # Different entity types
+                        knowledge_graph["relationships"].append({
+                            "subject": ent1["text"],
+                            "subject_type": ent1["label"],
+                            "object": ent2["text"],
+                            "object_type": ent2["label"],
+                            "relation": "co_occurs_with",
+                            "context": sentence,
+                            "confidence": min(ent1["confidence"], ent2["confidence"])
+                        })
+        
+        # Extract topics using enhanced method
+        knowledge_graph["topics"] = self._extract_topics(all_text)
+        
+        # Add sentiment analysis for overall content
+        knowledge_graph["sentiment_analysis"] = self.get_sentiment(all_text)
+        
+        # Add segment-level sentiment if we have multiple segments
+        if len(hierarchical_segments) > 1:
+            knowledge_graph["segment_sentiments"] = []
+            for segment in hierarchical_segments[:10]:  # Limit to first 10
+                if segment["text"].strip():
+                    segment_sentiment = self.get_sentiment(segment["text"])
+                    knowledge_graph["segment_sentiments"].append({
+                        "segment_id": segment["segment_id"],
+                        "sentiment": segment_sentiment,
+                        "text_preview": segment["text"][:100] + "..." if len(segment["text"]) > 100 else segment["text"]
+                    })
+        
+        return knowledge_graph
+
+    def _group_transcripts_by_semantic_similarity(self, transcripts: List[Dict], 
+                                                max_segment_duration: float = None) -> List[List[Dict]]:
+        """Group transcripts by semantic similarity (enhanced with NLP awareness)"""
+        if not transcripts:
+            return []
+        
+        if len(transcripts) == 1:
+            return [transcripts]
+        
+        max_duration = max_segment_duration or self.max_segment_duration
+        
+        # Use embedding model if available for better grouping
+        if self.embedding_model:
+            texts = [t["text"] for t in transcripts if t["text"].strip()]
+            if texts:
+                try:
+                    embeddings = self.embedding_model.encode(texts)
+                    # Use embeddings for more sophisticated grouping
+                    # For now, fall back to time-based grouping
+                except Exception as e:
+                    logger.warning(f"Embedding-based grouping failed: {e}")
+        
+        # Enhanced time-based grouping with semantic validation
+        groups = []
+        current_group = [transcripts[0]]
+        
+        for i in range(1, len(transcripts)):
+            transcript = transcripts[i]
+            group_end = current_group[-1]["end"]
+            segment_duration = transcript["end"] - current_group[0]["start"]
+            
+            # Check if we should start a new group
+            should_split = (
+                segment_duration > max_duration or
+                transcript["start"] - group_end > 2.0  # 2 second gap
+            )
+            
+            # Additional semantic check if NLP is available
+            if not should_split and self.nlp_method != "basic":
+                current_text = " ".join(t["text"] for t in current_group)
+                new_text = transcript["text"]
+                
+                # Simple semantic continuity check
+                if len(current_text) > 50 and len(new_text) > 10:
+                    # Check for topic shift using simple keyword overlap
+                    current_sentiment = self.get_sentiment(current_text)
+                    new_sentiment = self.get_sentiment(new_text)
+                    
+                    # If sentiment polarity changes significantly, consider splitting
+                    sentiment_diff = abs(current_sentiment["polarity"] - new_sentiment["polarity"])
+                    if sentiment_diff > 0.7:  # Significant sentiment change
+                        should_split = True
+            
+            if should_split:
+                groups.append(current_group)
+                current_group = [transcript]
+            else:
+                current_group.append(transcript)
+        
+        if current_group:
+            groups.append(current_group)
+        
+        return groups
+
+    def _convert_numpy_types(self, obj):
+        """Convert numpy types to Python native types (unchanged)"""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {key: self._convert_numpy_types(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_numpy_types(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return tuple(self._convert_numpy_types(item) for item in obj)
+        return obj
+
+    async def _extract_video_info(self, video_path: str) -> Dict:
+        """Extract basic video information (unchanged)"""
+        cap = cv2.VideoCapture(video_path)
+        info = {
+            "fps": cap.get(cv2.CAP_PROP_FPS),
+            "frame_count": int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+            "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            "duration": cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS)
+        }
+        cap.release()
+        return info
+
+    # === Additional helper methods for enhanced NLP ===
+    
+    def get_nlp_capabilities(self) -> Dict[str, Any]:
+        """Get information about available NLP capabilities"""
+        capabilities = {
+            "nlp_method": self.nlp_method,
+            "entity_extraction": True,
+            "sentiment_analysis": self.nlp_method in ["spacy", "nltk_textblob"],
+            "topic_extraction": True,
+            "relationship_extraction": True,
+            "confidence_levels": {
+                "spacy": "high",
+                "nltk_textblob": "medium", 
+                "basic": "low"
+            }.get(self.nlp_method, "unknown")
+        }
+        
+        # Add specific capabilities based on method
+        if self.nlp_method == "spacy":
+            capabilities.update({
+                "supported_entities": ["PERSON", "ORG", "GPE", "MONEY", "DATE", "TIME"],
+                "language_detection": True,
+                "pos_tagging": True,
+                "dependency_parsing": True
+            })
+        elif self.nlp_method == "nltk_textblob":
+            capabilities.update({
+                "supported_entities": ["PERSON", "ORGANIZATION", "GPE"],
+                "language_detection": False,
+                "pos_tagging": True,
+                "dependency_parsing": False
+            })
+        else:
+            capabilities.update({
+                "supported_entities": ["PERSON", "ORG", "LOCATION"],
+                "language_detection": False,
+                "pos_tagging": False,
+                "dependency_parsing": False
+            })
+        
+        return capabilities
+
+    async def analyze_text_quality(self, text: str) -> Dict[str, Any]:
+        """Analyze text quality and provide recommendations"""
+        if not text.strip():
+            return {"quality": "empty", "recommendations": ["No text to analyze"]}
+        
+        analysis = {
+            "length": len(text),
+            "word_count": len(text.split()),
+            "sentence_count": len([s for s in text.split('.') if s.strip()]),
+            "avg_words_per_sentence": 0,
+            "quality": "unknown",
+            "recommendations": []
+        }
+        
+        # Calculate average words per sentence
+        if analysis["sentence_count"] > 0:
+            analysis["avg_words_per_sentence"] = analysis["word_count"] / analysis["sentence_count"]
+        
+        # Determine quality
+        if analysis["word_count"] < 10:
+            analysis["quality"] = "too_short"
+            analysis["recommendations"].append("Text is very short - may not provide meaningful analysis")
+        elif analysis["word_count"] > 1000:
+            analysis["quality"] = "very_long"
+            analysis["recommendations"].append("Text is very long - consider breaking into smaller segments")
+        elif analysis["avg_words_per_sentence"] > 30:
+            analysis["quality"] = "complex"
+            analysis["recommendations"].append("Sentences are quite long - may affect processing accuracy")
+        elif analysis["avg_words_per_sentence"] < 5:
+            analysis["quality"] = "fragmented"
+            analysis["recommendations"].append("Sentences are very short - may be transcription fragments")
+        else:
+            analysis["quality"] = "good"
+            analysis["recommendations"].append("Text quality is suitable for NLP processing")
+        
+        # Add NLP-specific recommendations
+        if self.nlp_method == "basic":
+            analysis["recommendations"].append("Using basic NLP - consider installing spaCy or NLTK for better results")
+        
+        return analysis
+
+# Global instance (keep original naming)
+internvl_enhanced_video_processor = InternVLEnhancedVideoProcessor()
+
+async def get_internvl_enhanced_video_processor() -> InternVLEnhancedVideoProcessor:
+    """Get the enhanced video processor instance (keep original function name)"""
+    return internvl_enhanced_video_processor
+
+# Maintain backward compatibility with original function names
+enhanced_video_processor = InternVLEnhancedVideoProcessor()
+
+async def get_enhanced_video_processor() -> InternVLEnhancedVideoProcessor:
+    """Get enhanced video processor instance (original function name)"""
+    return enhanced_video_processor
+
+# Additional alias for compatibility
+EnhancedVideoProcessor = InternVLEnhancedVideoProcessor

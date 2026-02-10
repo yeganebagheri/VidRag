@@ -1,0 +1,39 @@
+# ml_requirements.txt - UPDATED VERSION
+
+# Core ML dependencies
+torch==2.1.0
+torchvision==0.16.0
+torchaudio==2.1.0
+transformers==4.46.0
+sentence-transformers==2.7.0
+faster-whisper==1.1.1  # Updated from 1.0.0
+
+# Vision & OCR
+opencv-python==4.10.0.84
+pillow==10.2.0
+easyocr==1.7.0
+
+# NLP
+spacy==3.7.0
+nltk==3.9.1
+
+# Vector operations
+faiss-cpu==1.12.0
+numpy==1.26.4
+
+# AWS
+boto3==1.40.37
+botocore==1.40.37
+
+# Database
+sqlalchemy==2.0.43
+asyncpg==0.29.0
+psycopg2-binary==2.9.10
+
+# Utilities
+aiofiles==24.1.0
+python-dotenv==1.1.1
+
+torch-geometric==2.4.0
+torch-scatter==2.1.2
+torch-sparse==0.6.18
